@@ -116,7 +116,7 @@ export abstract class Throttler<T> {
   }
 
   /**
-   * Add the task to the throttler and return a promise signaling when the task is completed.
+   * Add the task to the throttler and return a promise of handler's result.
    */
   public throttle<R>(task: T): Promise<R> {
     return new Promise<R>((resolve, reject) => {
@@ -158,7 +158,6 @@ export abstract class Throttler<T> {
       this.success++;
       this.complete++;
       this.active--;
-
       if (taskData.wait) {
         taskData.wait.resolve(result);
       }
