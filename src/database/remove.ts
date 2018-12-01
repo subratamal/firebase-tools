@@ -19,7 +19,7 @@ export default class DatabaseRemove {
   public concurrency: number;
   public retries: number;
   public remote: RemoveRemote;
- //  private jobStack: Stack;
+  private jobStack: Stack<() => Promise<any>>;
 
   /**
    * Construct a new RTDB delete operation.
@@ -33,12 +33,11 @@ export default class DatabaseRemove {
     this.concurrency = options.concurrency;
     this.retries = options.retries;
     this.remote = new RTDBRemoveRemote(options.instance);
-    // this.jobStack = new Stack({
-    //   name: "long delete stack",
-    //   concurrency: this.concurrency,
-    //   handler: this.chunkedDelete.bind(this),
-    //   retries: this.retries,
-    //  });
+    this.jobStack = new Stack({
+      name: "long delete stack",
+      concurrency: this.concurrency,
+      retries: this.retries,
+    });
   }
 
   public execute(): Promise<void> {
@@ -46,14 +45,18 @@ export default class DatabaseRemove {
   }
 
   private async chunkedDelete(path: string): Promise<void> {
-    switch (await this.remote.prefetchTest(path)) {
+    switch (await this.jobStack.throttle<NodeSize>(() => this.remote.prefetchTest(path))) {
       case NodeSize.SMALL:
-        await this.remote.deletePath(path);
+        await this.jobStack.throttle<void>(() => this.remote.deletePath(path));
         break;
       case NodeSize.LARGE:
-        const pathList = await this.remote.listPath(path);
-        await Promise.all(pathList.map((p) => this.chunkedDelete(pathLib.join(path, p))));
-        await this.chunkedDelete(path);
+        const pathList = await this.jobStack.throttle<string[]>(() => this.remote.listPath(path));
+        await Promise.all(
+          pathList.map((p) =>
+            this.jobStack.throttle<void>(() => this.chunkedDelete(pathLib.join(path, p)))
+          )
+        );
+        await this.jobStack.throttle<void>(() => this.chunkedDelete(path));
         break;
       case NodeSize.EMPTY:
         break;

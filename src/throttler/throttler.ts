@@ -34,6 +34,7 @@ export interface ThrottlerStats {
 interface TaskData<T> {
   task: T;
   retryCount: number;
+  wait: { resolve: (result: any) => void; reject: (err: Error) => void } | undefined;
 }
 
 export abstract class Throttler<T> {
@@ -95,21 +96,32 @@ export abstract class Throttler<T> {
     return p;
   }
 
-  public add(task: T): void {
+  /**
+   * Add the task to the throttler, which eventually gets executed.
+   */
+  public add(task: T, wait?: { resolve: () => void; reject: (err: Error) => void }): void {
     if (this.closed) {
       throw new Error("Cannot add a task to a closed throttler.");
     }
-
     if (!this.startTime) {
       this.startTime = Date.now();
     }
-
     this.tasks[this.total] = {
       task,
-      retryCount: 0
+      wait,
+      retryCount: 0,
     };
     this.total++;
     this.process();
+  }
+
+  /**
+   * Add the task to the throttler and return a promise signaling when the task is completed.
+   */
+  public throttle<R>(task: T): Promise<R> {
+    return new Promise<R>((resolve, reject) => {
+      this.add(task, { resolve, reject });
+    });
   }
 
   public close(): boolean {
@@ -133,7 +145,7 @@ export abstract class Throttler<T> {
     const t0 = Date.now();
 
     try {
-      await this.handler(task);
+      const result = await this.handler(task);
       const dt = Date.now() - t0;
       if (dt < this.min) {
         this.min = dt;
@@ -146,6 +158,10 @@ export abstract class Throttler<T> {
       this.success++;
       this.complete++;
       this.active--;
+
+      if (taskData.wait) {
+        taskData.wait.resolve(result);
+      }
       delete this.tasks[cursorIndex];
       this.process();
     } catch (err) {
@@ -166,6 +182,9 @@ export abstract class Throttler<T> {
         logger.debug(`[${this.name}] Retries exhausted for task ${tname}:`, err);
       } else {
         logger.debug(`[${this.name}] Error on task ${tname}:`, err);
+      }
+      if (taskData.wait) {
+        taskData.wait.reject(err);
       }
       this._finish(err);
     }
