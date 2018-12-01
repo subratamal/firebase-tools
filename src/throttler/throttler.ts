@@ -31,6 +31,11 @@ export interface ThrottlerStats {
   elapsed: number;
 }
 
+interface TaskData<T> {
+  task: T;
+  retryCount: number;
+}
+
 export abstract class Throttler<T> {
   public name: string = "";
   public concurrency: number = 200;
@@ -41,14 +46,13 @@ export abstract class Throttler<T> {
   public errored: number = 0;
   public retried: number = 0;
   public total: number = 0;
-  public tasks: { [index: number]: T } = {};
+  public tasks: { [index: number]: TaskData<T> } = {};
   public waits: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
   public min: number = 9999999999;
   public max: number = 0;
   public avg: number = 0;
   public retries: number = 0;
   public backoff: number = 200;
-  public retryCounts: { [index: number]: number } = {};
   public closed: boolean = false;
   public finished: boolean = false;
   public startTime: number = 0;
@@ -100,7 +104,10 @@ export abstract class Throttler<T> {
       this.startTime = Date.now();
     }
 
-    this.tasks[this.total] = task;
+    this.tasks[this.total] = {
+      task,
+      retryCount: 0
+    };
     this.total++;
     this.process();
   }
@@ -120,7 +127,8 @@ export abstract class Throttler<T> {
   }
 
   public async handle(cursorIndex: number): Promise<void> {
-    const task = this.tasks[cursorIndex];
+    const taskData = this.tasks[cursorIndex];
+    const task = taskData.task;
     const tname = this.taskName(cursorIndex);
     const t0 = Date.now();
 
@@ -139,15 +147,13 @@ export abstract class Throttler<T> {
       this.complete++;
       this.active--;
       delete this.tasks[cursorIndex];
-      delete this.retryCounts[cursorIndex];
       this.process();
     } catch (err) {
       if (this.retries > 0) {
-        this.retryCounts[cursorIndex] = this.retryCounts[cursorIndex] || 0;
-        if (this.retryCounts[cursorIndex] < this.retries) {
-          this.retryCounts[cursorIndex]++;
+        if (taskData.retryCount < this.retries) {
+          taskData.retryCount++;
           this.retried++;
-          await _backoff(this.retryCounts[cursorIndex], this.backoff);
+          await _backoff(taskData.retryCount, this.backoff);
           logger.debug(`[${this.name}] Retrying task`, tname);
           return this.handle(cursorIndex);
         }
@@ -156,7 +162,7 @@ export abstract class Throttler<T> {
       this.errored++;
       this.complete++;
       this.active--;
-      if (this.retryCounts[cursorIndex] > 0) {
+      if (taskData.retryCount > 0) {
         logger.debug(`[${this.name}] Retries exhausted for task ${tname}:`, err);
       } else {
         logger.debug(`[${this.name}] Error on task ${tname}:`, err);
@@ -181,8 +187,11 @@ export abstract class Throttler<T> {
   }
 
   public taskName(cursorIndex: number): string {
-    const task = this.tasks[cursorIndex] || "finished task";
-    return typeof task === "string" ? task : `index ${cursorIndex}`;
+    const taskData = this.tasks[cursorIndex];
+    if (!taskData) {
+      return "finished task";
+    }
+    return typeof taskData.task === "string" ? taskData.task : `index ${cursorIndex}`;
   }
 
   private _finishIfIdle(): boolean {
